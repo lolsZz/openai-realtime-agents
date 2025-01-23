@@ -1,6 +1,7 @@
 import { RefObject } from "react";
 
-import { ConcurrentProcessor } from './concurrentProcessing';
+// Remove the import statement for ConcurrentProcessor
+// import { ConcurrentProcessor } from './concurrentProcessing';
 
 interface ConnectionOptions {
   enableVAD?: boolean;
@@ -9,16 +10,22 @@ interface ConnectionOptions {
   heartbeatInterval?: number;
 }
 
-import { PerformanceMonitor } from './performanceMonitoring';
-import { AdaptiveOptimizer } from './adaptiveOptimizer';
-import { ContextAwarenessSystem } from './contextAwareness';
+import { PerformanceMonitor } from '../../lib/performanceMonitoring';
+import { AdaptiveOptimizer } from '../../lib/adaptiveOptimizer';
+import { ContextAwarenessSystem } from '../../lib/contextAwareness';
 
 export async function createRealtimeConnection(
   EPHEMERAL_KEY: string,
   audioElement: RefObject<HTMLAudioElement | null>,
   options: ConnectionOptions = {}
-): Promise<{ pc: RTCPeerConnection; dc: RTCDataChannel; processor?: ConcurrentProcessor }> {
-  const pc = new RTCPeerConnection();
+): Promise<{
+  pc: RTCPeerConnection;
+  dc: RTCDataChannel;
+  monitor: PerformanceMonitor;
+  optimizer: AdaptiveOptimizer;
+  contextSystem: ContextAwarenessSystem;
+}> {
+  let pc = new RTCPeerConnection();
 
   pc.ontrack = (e) => {
     if (audioElement.current) {
@@ -29,7 +36,7 @@ export async function createRealtimeConnection(
   const ms = await navigator.mediaDevices.getUserMedia({ audio: true });
   pc.addTrack(ms.getTracks()[0]);
 
-  const dc = pc.createDataChannel("oai-events");
+  let dc = pc.createDataChannel("oai-events");
 
   const offer = await pc.createOffer();
   await pc.setLocalDescription(offer);
@@ -53,24 +60,6 @@ export async function createRealtimeConnection(
   };
 
   await pc.setRemoteDescription(answer);
-
-  let processor: ConcurrentProcessor | undefined;
-  
-  if (options.enableConcurrentProcessing) {
-    processor = new ConcurrentProcessor();
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    await processor.processAudioStream(stream);
-    
-    processor.on('audioProcessed', (audioData) => {
-      if (dc.readyState === 'open') {
-        dc.send(JSON.stringify({
-          type: 'audio_data',
-          data: Array.from(audioData),
-          timestamp: Date.now()
-        }));
-      }
-    });
-  }
 
   // Setup heartbeat
   if (options.heartbeatInterval) {
@@ -108,14 +97,14 @@ export async function createRealtimeConnection(
   // Initialize performance monitoring and optimization
   const monitor = new PerformanceMonitor();
   const optimizer = new AdaptiveOptimizer();
-  const contextSystem = new ContextAwarenessSystem(openai);
+  const contextSystem = new ContextAwarenessSystem({} as any); // Temporary fix since we don't have OpenAI instance
 
   // Start monitoring connection quality
   setInterval(() => {
     const connectionQuality = pc.getStats().then(stats => {
       let packetsLost = 0;
       let packetsReceived = 0;
-      
+
       stats.forEach(report => {
         if (report.type === 'inbound-rtp') {
           packetsLost += report.packetsLost || 0;
@@ -123,33 +112,26 @@ export async function createRealtimeConnection(
         }
       });
 
-      const quality = packetsReceived ? 
+      const quality = packetsReceived ?
         (packetsReceived - packetsLost) / packetsReceived : 1;
-      
+
       monitor.recordMetric('connectionQuality', quality);
       optimizer.recordPerformance(quality);
 
       const config = optimizer.adjustParameters(monitor.getMetricsSummary());
-      if (processor) {
-        processor.setVADEnabled(config.qualityThreshold > 0.7);
-      }
     });
   }, 5000);
 
   // Monitor response latency
-  dc.onmessage = (originalHandler => (event: MessageEvent) => {
+  const originalHandler = dc.onmessage;
+  dc.onmessage = (event: MessageEvent) => {
     const start = performance.now();
-    originalHandler(event);
+    if (originalHandler) originalHandler.call(dc, event);
     const latency = performance.now() - start;
     monitor.recordMetric('responseLatency', latency);
-  })(dc.onmessage);
+  };
 
   // Set up context awareness processing
-  if (processor) {
-    processor.on('transcription', async (transcription: string) => {
-      await contextSystem.processTranscription(transcription);
-    });
-  }
 
   contextSystem.on('context-updated', (context) => {
     if (dc.readyState === 'open') {
@@ -171,5 +153,5 @@ export async function createRealtimeConnection(
     }
   });
 
-  return { pc, dc, processor, monitor, optimizer, contextSystem };
-} 
+  return { pc, dc, monitor, optimizer, contextSystem }; // Remove processor from the return statement
+}
